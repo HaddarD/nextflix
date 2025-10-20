@@ -25,23 +25,23 @@ jobs:
     - name: Push Docker image to Docker Hub
       run: docker push doramar97/nextflix-int:${{ github.sha }}
 
-    # - name: Checkout Target Repository
-    #   uses: actions/checkout@v3
-    #   with:
-    #       repository: dor-amar/config
-    #       path: infrastructure
-    #       token: ${{ secrets.TOKEN }} 
+    - name: Checkout Target Repository
+      uses: actions/checkout@v3
+      with:
+          repository: dor-amar/config
+          path: infrastructure
+          token: ${{ secrets.TOKEN }} 
 
-    # # Update the config repo with the new image
-    # - name: Update Image Version in the related HelmChart values.yaml
-    #   uses: fjogeleit/yaml-update-action@main
-    #   with:
-    #       valueFile: 'apps/sample/deployment.yaml'
-    #       propertyPath: 'spec.template.spec.containers[0].image'
-    #       value: doramar97/argo-app:${{ github.sha }}
-    #       repository: dor-amar/config
-    #       branch: main
-    #       targetBranch: main
-    #       message: 'Update Image Version to ${{ steps.image.outputs.version }}'
-    #       token: ${{ secrets.TOKEN }}
-    #       workDir: infrastructure
+    # Update the config repo with the new image
+    - name: Update Image Version in the related HelmChart values.yaml
+      uses: fjogeleit/yaml-update-action@main
+      with:
+          valueFile: 'netflix/app/deployment.yaml'
+          propertyPath: 'spec.template.spec.containers[0].image'
+          value: doramar97/nextflix-int:${{ github.sha }}
+          repository: dor-amar/config
+          branch: main
+          targetBranch: main
+          message: 'Update Image Version to ${{ github.sha }}'
+          token: ${{ secrets.TOKEN }}
+          workDir: infrastructure
