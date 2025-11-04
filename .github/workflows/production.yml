@@ -74,8 +74,9 @@ jobs:
           chmod 600 ~/.ssh/production_key
           ssh-keyscan -H $PRODUCTION_HOST >> ~/.ssh/known_hosts
           
-          ssh -i ~/.ssh/production_key ubuntu@$PRODUCTION_HOST << 'ENDSSH'
+          ssh -T -i ~/.ssh/production_key ubuntu@$PRODUCTION_HOST << 'ENDSSH'
             aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            
             docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
             
             # Blue-green deployment
@@ -123,35 +124,36 @@ jobs:
           done
           exit 1
           
-      - name: Slack Notification
+      - name: Telegram Notification
         if: always()
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           if [ "${{ job.status }}" == "success" ]; then
             STATUS_EMOJI="🚀"
-            STATUS_COLOR="good"
+            STATUS="SUCCESS"
           else
             STATUS_EMOJI="❌"
-            STATUS_COLOR="danger"
+            STATUS="FAILED"
           fi
           
-          curl -X POST $SLACK_WEBHOOK_URL \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "attachments": [{
-                "color": "'"$STATUS_COLOR"'",
-                "title": "'"$STATUS_EMOJI"' Production Deployment",
-                "fields": [
-                  {"title": "Environment", "value": "🏭 Production (t3.micro)", "short": true},
-                  {"title": "Version", "value": "'"$VERSION"'", "short": true},
-                  {"title": "Status", "value": "${{ job.status }}", "short": true},
-                  {"title": "Author", "value": "${{ github.actor }}", "short": true},
-                  {"title": "URL", "value": "http://${{ secrets.PRODUCTION_HOST }}:3000", "short": false}
-                ]
-              }]
-            }'
+          COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1 | sed 's/"/\\"/g')
+          
+          MESSAGE="${STATUS_EMOJI} *Production Deployment ${STATUS}*%0A%0A"
+          MESSAGE="${MESSAGE}*Environment:* 🏭 Production (t3.micro)%0A"
+          MESSAGE="${MESSAGE}*Version:* ${VERSION}%0A"
+          MESSAGE="${MESSAGE}*Author:* ${{ github.actor }}%0A"
+          MESSAGE="${MESSAGE}*Commit:* $(echo ${{ github.sha }} | cut -c1-7)%0A"
+          MESSAGE="${MESSAGE}*Message:* ${COMMIT_MSG}%0A"
+          MESSAGE="${MESSAGE}*Status:* ${{ job.status }}%0A"
+          MESSAGE="${MESSAGE}*URL:* http://${{ secrets.PRODUCTION_HOST }}:3000"
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=Markdown"
           
       - name: Create GitHub Release
         if: success()
@@ -161,4 +163,4 @@ jobs:
         run: |
           gh release create $VERSION \
             --title "Release $VERSION" \
-            --notes "Production deployment $VERSION on t3.micro instances"
+            --notes "Production deployment $VERSION on t3.micro instances with IAM roles"

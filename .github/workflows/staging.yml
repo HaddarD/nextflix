@@ -56,11 +56,13 @@ jobs:
           chmod 600 ~/.ssh/staging_key
           ssh-keyscan -H $STAGING_HOST >> ~/.ssh/known_hosts
           
-          ssh -i ~/.ssh/staging_key ubuntu@$STAGING_HOST << 'ENDSSH'
+          ssh -T -i ~/.ssh/staging_key ubuntu@$STAGING_HOST << 'ENDSSH'
             aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            
             docker stop haddar-nextflix-staging || true
             docker rm haddar-nextflix-staging || true
             docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            
             docker run -d \
               --name haddar-nextflix-staging \
               --restart unless-stopped \
@@ -69,6 +71,7 @@ jobs:
               -m 768m \
               --memory-swap 768m \
               ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            
             docker image prune -af --filter "until=48h"
           ENDSSH
           
@@ -85,31 +88,30 @@ jobs:
           done
           exit 1
           
-      - name: Slack Notification
+      - name: Telegram Notification
         if: always()
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           if [ "${{ job.status }}" == "success" ]; then
             STATUS_EMOJI="✅"
-            STATUS_COLOR="good"
+            STATUS="SUCCESS"
           else
             STATUS_EMOJI="❌"
-            STATUS_COLOR="danger"
+            STATUS="FAILED"
           fi
           
-          curl -X POST $SLACK_WEBHOOK_URL \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "attachments": [{
-                "color": "'"$STATUS_COLOR"'",
-                "title": "'"$STATUS_EMOJI"' Staging Deployment",
-                "fields": [
-                  {"title": "Environment", "value": "Staging (t3.micro)", "short": true},
-                  {"title": "PR", "value": "#${{ github.event.pull_request.number }}", "short": true},
-                  {"title": "Status", "value": "${{ job.status }}", "short": true},
-                  {"title": "Author", "value": "${{ github.actor }}", "short": true},
-                  {"title": "URL", "value": "http://${{ secrets.STAGING_HOST }}:3000", "short": false}
-                ]
-              }]
-            }'
+          MESSAGE="${STATUS_EMOJI} *Staging Deployment ${STATUS}*%0A%0A"
+          MESSAGE="${MESSAGE}*Environment:* Staging (t3.micro)%0A"
+          MESSAGE="${MESSAGE}*PR:* #${{ github.event.pull_request.number }}%0A"
+          MESSAGE="${MESSAGE}*Author:* ${{ github.actor }}%0A"
+          MESSAGE="${MESSAGE}*Branch:* ${{ github.head_ref }}%0A"
+          MESSAGE="${MESSAGE}*Commit:* $(echo ${{ github.sha }} | cut -c1-7)%0A"
+          MESSAGE="${MESSAGE}*Status:* ${{ job.status }}%0A"
+          MESSAGE="${MESSAGE}*URL:* http://${{ secrets.STAGING_HOST }}:3000"
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=Markdown"
