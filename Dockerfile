@@ -1,33 +1,28 @@
-# NextFlix Dockerfile - Optimized for t3.micro
-FROM node:18-alpine AS deps
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci
+# NextFlix Dockerfile - Simplified for compatibility
+FROM node:18-alpine
 
-FROM node:18-alpine AS builder
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies (use npm install, not npm ci)
+RUN npm install
+
+# Copy all application files
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED 1
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS="--max-old-space-size=512"
+ENV PORT=3000
+
+# Build the Next.js application
 RUN npm run build
 
-FROM node:18-alpine AS runner
-WORKDIR /app
-ENV NODE_ENV production
-ENV NEXT_TELEMETRY_DISABLED 1
-ENV NODE_OPTIONS="--max-old-space-size=512"
-
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
-COPY --from=builder --chown=nextjs:nodejs /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nextjs:nodejs /app/package.json ./package.json
-
-USER nextjs
+# Expose port
 EXPOSE 3000
-ENV PORT 3000
 
+# Start the application
 CMD ["npm", "start"]
