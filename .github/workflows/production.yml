@@ -1,0 +1,164 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: haddar-nextflix_cicd-repo
+
+jobs:
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Generate version
+        id: version
+        run: |
+          VERSION="v1.0.${{ github.run_number }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION $ECR_REGISTRY/$ECR_REPOSITORY:production-latest
+          
+      - name: Push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:production-latest
+          
+      - name: Create Git Tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a $VERSION -m "Release $VERSION"
+          git push origin $VERSION || true
+          
+      - name: Deploy to Production EC2
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$PRODUCTION_SSH_KEY" > ~/.ssh/production_key
+          chmod 600 ~/.ssh/production_key
+          ssh-keyscan -H $PRODUCTION_HOST >> ~/.ssh/known_hosts
+          
+          ssh -i ~/.ssh/production_key ubuntu@$PRODUCTION_HOST << 'ENDSSH'
+            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+            
+            # Blue-green deployment
+            docker run -d --name haddar-nextflix-production-new -p 3001:3000 \
+              -e NODE_ENV=production \
+              -m 768m \
+              --memory-swap 768m \
+              ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+            
+            sleep 15
+            
+            if curl -f http://localhost:3001/ > /dev/null 2>&1; then
+              docker stop haddar-nextflix-production || true
+              docker rm haddar-nextflix-production || true
+              docker stop haddar-nextflix-production-new
+              docker rm haddar-nextflix-production-new
+              
+              docker run -d \
+                --name haddar-nextflix-production \
+                --restart unless-stopped \
+                -p 3000:3000 \
+                -e NODE_ENV=production \
+                -m 768m \
+                --memory-swap 768m \
+                ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+              
+              docker image prune -af --filter "until=72h"
+            else
+              docker stop haddar-nextflix-production-new
+              docker rm haddar-nextflix-production-new
+              exit 1
+            fi
+          ENDSSH
+          
+      - name: Health Check
+        run: |
+          sleep 15
+          for i in {1..30}; do
+            if curl -f http://${{ secrets.PRODUCTION_HOST }}:3000/ > /dev/null 2>&1; then
+              echo "✅ Production deployment successful!"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          exit 1
+          
+      - name: Slack Notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            STATUS_EMOJI="🚀"
+            STATUS_COLOR="good"
+          else
+            STATUS_EMOJI="❌"
+            STATUS_COLOR="danger"
+          fi
+          
+          curl -X POST $SLACK_WEBHOOK_URL \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$STATUS_COLOR"'",
+                "title": "'"$STATUS_EMOJI"' Production Deployment",
+                "fields": [
+                  {"title": "Environment", "value": "🏭 Production (t3.micro)", "short": true},
+                  {"title": "Version", "value": "'"$VERSION"'", "short": true},
+                  {"title": "Status", "value": "${{ job.status }}", "short": true},
+                  {"title": "Author", "value": "${{ github.actor }}", "short": true},
+                  {"title": "URL", "value": "http://${{ secrets.PRODUCTION_HOST }}:3000", "short": false}
+                ]
+              }]
+            }'
+          
+      - name: Create GitHub Release
+        if: success()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create $VERSION \
+            --title "Release $VERSION" \
+            --notes "Production deployment $VERSION on t3.micro instances"

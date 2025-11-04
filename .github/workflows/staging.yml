@@ -1,0 +1,115 @@
+name: Deploy to Staging
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: haddar-nextflix_cicd-repo
+  IMAGE_TAG: staging-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:staging-latest
+          
+      - name: Push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:staging-latest
+          
+      - name: Deploy to Staging EC2
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$STAGING_SSH_KEY" > ~/.ssh/staging_key
+          chmod 600 ~/.ssh/staging_key
+          ssh-keyscan -H $STAGING_HOST >> ~/.ssh/known_hosts
+          
+          ssh -i ~/.ssh/staging_key ubuntu@$STAGING_HOST << 'ENDSSH'
+            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            docker stop haddar-nextflix-staging || true
+            docker rm haddar-nextflix-staging || true
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            docker run -d \
+              --name haddar-nextflix-staging \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              -e NODE_ENV=production \
+              -m 768m \
+              --memory-swap 768m \
+              ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            docker image prune -af --filter "until=48h"
+          ENDSSH
+          
+      - name: Health Check
+        run: |
+          sleep 15
+          for i in {1..30}; do
+            if curl -f http://${{ secrets.STAGING_HOST }}:3000/ > /dev/null 2>&1; then
+              echo "✅ Staging deployment successful!"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          exit 1
+          
+      - name: Slack Notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            STATUS_EMOJI="✅"
+            STATUS_COLOR="good"
+          else
+            STATUS_EMOJI="❌"
+            STATUS_COLOR="danger"
+          fi
+          
+          curl -X POST $SLACK_WEBHOOK_URL \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$STATUS_COLOR"'",
+                "title": "'"$STATUS_EMOJI"' Staging Deployment",
+                "fields": [
+                  {"title": "Environment", "value": "Staging (t3.micro)", "short": true},
+                  {"title": "PR", "value": "#${{ github.event.pull_request.number }}", "short": true},
+                  {"title": "Status", "value": "${{ job.status }}", "short": true},
+                  {"title": "Author", "value": "${{ github.actor }}", "short": true},
+                  {"title": "URL", "value": "http://${{ secrets.STAGING_HOST }}:3000", "short": false}
+                ]
+              }]
+            }'
