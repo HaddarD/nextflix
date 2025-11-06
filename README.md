@@ -32,3 +32,23 @@ It runs the app in the development mode.<br />
 Open [http://localhost:3000](http://localhost:3000) to view it in the browser. 
 
 
+
+## CI/CD Pipeline
+This project includes automated CI/CD pipeline with:
+- Staging deployment on Pull Requests
+- Production deployment on merge to main
+- Telegram notifications for deployment status
+- Zero-downtime blue-green deployments
+- Docker containerization with Node 16
+- AWS ECR for container registry
+- IAM roles for secure EC2-to-ECR access
+
+## CI/CD Pipeline
+This project includes automated CI/CD pipeline with:
+- Staging deployment on Pull Requests
+- Production deployment on merge to main
+- Telegram notifications for deployment status
+- Zero-downtime blue-green deployments
+- Docker containerization with Node 16
+- AWS ECR for container registry
+- IAM roles for secure EC2-to-ECR access
