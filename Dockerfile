@@ -1,12 +1,12 @@
-# NextFlix Dockerfile - Simplified for compatibility
-FROM node:18-alpine
+# NextFlix Dockerfile - Using Node 16 for compatibility
+FROM node:16-alpine
 
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (use npm install, not npm ci)
+# Install dependencies
 RUN npm install
 
 # Copy all application files
